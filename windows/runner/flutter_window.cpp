@@ -1,8 +1,24 @@
 #include "flutter_window.h"
 
+#include <flutter/standard_method_codec.h>
+
+#include <iostream>
+#include <memory>
 #include <optional>
 
 #include "flutter/generated_plugin_registrant.h"
+
+namespace {
+
+// Captured by the posted task; logs when the task (and thus its captures) is
+// destroyed, which should only happen after the task has run.
+struct DestructionLogger {
+  ~DestructionLogger() {
+    std::cout << "[runner] task destroyed" << std::endl;
+  }
+};
+
+}  // namespace
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
@@ -25,6 +41,32 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+
+  channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+      flutter_controller_->engine()->messenger(), "post_platform_thread",
+      &flutter::StandardMethodCodec::GetInstance());
+  channel_->SetMethodCallHandler(
+      [engine = flutter_controller_->engine()](
+          const flutter::MethodCall<flutter::EncodableValue>& call,
+          std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>
+              result) {
+        if (call.method_name() != "postTask") {
+          result->NotImplemented();
+          return;
+        }
+        std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>
+            shared_result = std::move(result);
+
+        std::cout << "[runner] posting task" << std::endl;
+        engine->PostPlatformThreadTask(
+            [shared_result, logger = std::make_shared<DestructionLogger>()]() {
+              std::cout << "[runner] task running" << std::endl;
+              shared_result->Success(flutter::EncodableValue(
+                  "Task ran on the platform thread"));
+            });
+        std::cout << "[runner] task posted" << std::endl;
+      });
+
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -40,6 +82,7 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  channel_ = nullptr;
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }
